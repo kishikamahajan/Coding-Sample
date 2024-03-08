@@ -1,0 +1,181 @@
+---
+title: "RA_Task_Final"
+author: "Kishika Mahajan"
+date: "2024-03-01"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE , warning=FALSE)
+```
+
+Setting the working directory, loading the libraries and the datasets - 
+
+```{r}
+setwd("/Users/kishikamahajan/Desktop/RA Task")
+library(tidyverse)
+library(foreign)
+library(countrycode)
+library(sf)
+library(maps)
+library(ggplot2)
+library(plm)
+city_level_data <- readRDS("reg_data.RDS")
+country_level_measure <- read.csv("fiw.csv")
+```
+
+Converting the country codes to country names , renaming the "countrycode" column to "country" and changing the country names in the city level data with the first letter as capital and rest as small to facilitate merging - 
+
+```{r}
+country_level_measure$countrycode <- countrycode(country_level_measure$countrycode, "iso3c" , "country.name")
+
+country_level_measure <- country_level_measure %>%
+  rename(country = countrycode)
+
+city_level_data$country <- str_to_title(city_level_data$country)
+```
+
+Converting the two datasets into panel data - 
+
+```{r}
+panel_data_countries <- pdata.frame(country_level_measure , index = c("country" , "year"))
+panel_data_cities <- pdata.frame(city_level_data , index = c("country" , "year"))
+```
+
+Merging the two datasets and then converting the merged dataset to a panel data - 
+
+```{r}
+merged_dataset <- merge(panel_data_cities, panel_data_countries, by = c("country", "year"))
+merged_panel_data <- pdata.frame(merged_dataset , index = c("country" , "year"))
+```
+
+Cleaning panel data for any duplicate values - 
+
+```{r}
+duplicates <- duplicated(row.names(merged_panel_data))
+final_panel_data <- merged_panel_data[!duplicates, ]
+```
+
+Running regression on merged panel data- 
+
+```{r}
+fixed_effect_model <- plm(pm2_5 ~ pm2.5_20km, data = final_panel_data, model = "within", effect = "individual")
+summary(fixed_effect_model)
+```
+
+Extracting the fixed effects from the model - 
+
+```{r}
+fixed_effects <- summary(fixef(fixed_effect_model, type = "dmean"))
+fixed_effects
+```
+
+Creating the dataframe with countries as a column - 
+
+```{r}
+fixed_effects <- fixed_effects %>%
+  as.data.frame() %>%  # Convert to dataframe (if not already)
+  mutate(country = rownames(fixed_effects))
+```
+
+Loading the shapefile and renaming the country column - 
+
+```{r}
+world_shapefile <- st_read(dsn = "/Users/kishikamahajan/Desktop/RA Task/world-administrative-boundaries/world-administrative-boundaries.shx")
+world_shapefile <- world_shapefile %>%
+  rename(country = name)
+```
+
+Merging the shapefile and the final panel dataset to get boundaries -
+
+```{r}
+boundaries_dataset <- left_join(world_shapefile , final_panel_data , by = "country")
+```
+
+Creating the categories - 
+
+```{r}
+boundaries_dataset<- boundaries_dataset %>%
+  mutate(country_type = case_when(
+    fiw_pr < 3 ~ "Free",
+    fiw_pr >= 3 & fiw_pr <= 5 ~ "Partially Free",
+    fiw_pr > 5 ~ "Not Free"
+  ))
+```
+
+Merging the boundaries database and the fixed effects database - 
+
+```{r}
+merged_regression_database <- merge(boundaries_dataset , fixed_effects , by = "country")
+```
+
+Creating subsets for each country type - 
+
+```{r}
+#For free countries - 
+free_countries <- merged_regression_database %>%
+  subset(country_type == "Free")
+
+#For not free countries - 
+not_free_countries <- merged_regression_database %>%
+  subset(country_type == "Not Free")
+
+#For partially free countries - 
+partially_free_countries <- merged_regression_database %>%
+  subset(country_type == "Partially Free")
+```
+
+Creating respective maps - 
+
+```{r}
+#For free countries - 
+ggplot() +
+  geom_sf(data = world_shapefile, aes(geometry = geometry), fill = "lightgray", color = "black") +
+  geom_sf(data = free_countries, aes(geometry = geometry, fill = Estimate)) +
+  scale_fill_gradientn(colours = rev(RColorBrewer::brewer.pal(9, "Reds")),
+                       breaks = c(-10, -5, 0, 20, 40, 60)) + 
+  ggtitle("Free Countries")
+```
+
+```{r}
+#For not free countries - 
+ggplot() +
+  geom_sf(data = world_shapefile, aes(geometry = geometry), fill = "lightgray", color = "black") +
+  geom_sf(data = not_free_countries, aes(geometry = geometry, fill = Estimate)) +
+  scale_fill_gradientn(colours = rev(RColorBrewer::brewer.pal(9, "Reds")),
+                       breaks = c(-15, -10, -5, 0, 10, 20, 40, 60, 80)) +  
+  ggtitle("Not Free Countries")
+
+```
+
+```{r}
+#For partially free countries - 
+ggplot() +
+  geom_sf(data = world_shapefile, aes(geometry = geometry), fill = "lightgray", color = "black") +
+  geom_sf(data = partially_free_countries, aes(geometry = geometry, fill = Estimate)) +
+  scale_fill_gradientn(colours = rev(RColorBrewer::brewer.pal(9, "Reds")),
+                       breaks = c(-15, -10, -5, 0, 10, 20, 30)) + 
+  ggtitle("Partially Free Countries")
+```
+
+Plotting all countries - 
+
+```{r}
+ggplot() +
+  geom_sf(data = world_shapefile, aes(geometry = geometry), fill = "lightgray", color = "black") +
+  geom_sf(data = merged_regression_database, aes(geometry = geometry, fill = Estimate)) +
+  scale_fill_gradientn(colours = rev(RColorBrewer::brewer.pal(9, "Reds"))) +
+  ggtitle("All countries")
+```
+
+Conclusion: 
+
+A negative value of the coefficient (Estimate) suggests that a same-sized increase in satellite PM2.5 measurements is associated with a smaller increase in reported PM2.5 pollution levels in the country. Essentially, it indicates whether there is underreporting of PM2.5 pollution levels by governments compared to satellite measurements. More negative values of βi suggest higher levels of underreporting.
+
+What can be seen is that for free and not free countries, the estimate is mostly negative with slightly higher negative values being in not free countries as compared to free countries. This means the level of underreporting (whenever there is any) is slightly higher in not free countries. However, this difference is minuscle. Moreover, more free countries underreport as compared to not free countries. 
+Even for partially free countries, there is some level of underreporting (like free and not free countries), but here, there are alot of countries in this category that are not underreporting. 
+
+Conclusively, there is no stark pattern of underreporting / overreporting that can be derived solely on the basis of democracy levels.  
